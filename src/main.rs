@@ -4,7 +4,7 @@ use clap::Parser;
 
 #[derive(Debug, Parser)]
 #[command(name = "context-map")]
-#[command(about = "Scan TypeScript exports and write a Markdown context map")]
+#[command(about = "Scan TS/TSX/Vue exports and write a Markdown context map")]
 struct Args {
     #[arg(long, default_value = ".")]
     root: PathBuf,

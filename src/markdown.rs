@@ -12,7 +12,10 @@ pub fn render_markdown(output: &RunOutput) -> String {
     lines.push(String::new());
 
     lines.push("## Summary".to_string());
-    lines.push(format!("- Scanned `.ts` files: {}", output.summary.scanned));
+    lines.push(format!(
+        "- Scanned source files (`.ts`, `.tsx`, `.vue`): {}",
+        output.summary.scanned
+    ));
     lines.push(format!("- Parsed files: {}", output.summary.parsed));
     lines.push(format!("- Parse errors: {}", output.summary.parse_failed));
     lines.push(format!(

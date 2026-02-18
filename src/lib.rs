@@ -69,7 +69,7 @@ pub fn generate_context_map(root: &Path) -> Result<RunOutput, ContextMapError> {
 
     let canonical_root = fs::canonicalize(root)?;
     let mut ts_parser = parser::TsExportParser::new().map_err(ContextMapError::ParserInit)?;
-    let files = walker::collect_ts_files(&canonical_root)?;
+    let files = walker::collect_source_files(&canonical_root)?;
 
     let mut summary = RunSummary {
         scanned: files.len(),
@@ -78,11 +78,16 @@ pub fn generate_context_map(root: &Path) -> Result<RunOutput, ContextMapError> {
 
     let mut file_results: Vec<FileResult> = Vec::with_capacity(files.len());
 
-    for file in files {
-        let relative = normalize_path(file.strip_prefix(&canonical_root).unwrap_or(&file));
+    for source_file in files {
+        let relative = normalize_path(
+            source_file
+                .path
+                .strip_prefix(&canonical_root)
+                .unwrap_or(&source_file.path),
+        );
 
-        match fs::read_to_string(&file) {
-            Ok(source) => match ts_parser.extract_exports(&source) {
+        match fs::read_to_string(&source_file.path) {
+            Ok(source) => match ts_parser.extract_exports_for_source(&source, &source_file.kind) {
                 Ok(extracted) => {
                     summary.parsed += 1;
                     summary.exported_functions += extracted.len();
