@@ -17,6 +17,13 @@ pub struct SourceFile {
     pub kind: SourceKind,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepoEntry {
+    pub path: PathBuf,
+    pub is_dir: bool,
+    pub depth: usize,
+}
+
 fn ignored_dirs() -> HashSet<&'static str> {
     [".git", "node_modules", "dist", "build", "target"]
         .into_iter()
@@ -84,13 +91,38 @@ pub fn collect_source_files(root: &Path) -> io::Result<Vec<SourceFile>> {
     Ok(files)
 }
 
+pub fn collect_repo_entries(root: &Path, max_depth: usize) -> io::Result<Vec<RepoEntry>> {
+    if !root.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("root is not a directory: {}", root.display()),
+        ));
+    }
+
+    let mut entries = WalkDir::new(root)
+        .max_depth(max_depth)
+        .into_iter()
+        .filter_entry(should_descend)
+        .filter_map(Result::ok)
+        .filter(|entry| entry.depth() > 0)
+        .map(|entry| RepoEntry {
+            path: entry.path().to_path_buf(),
+            is_dir: entry.file_type().is_dir(),
+            depth: entry.depth(),
+        })
+        .collect::<Vec<_>>();
+
+    entries.sort_by(|a, b| a.path.cmp(&b.path).then(a.is_dir.cmp(&b.is_dir).reverse()));
+    Ok(entries)
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
 
     use tempfile::TempDir;
 
-    use super::collect_source_files;
+    use super::{collect_repo_entries, collect_source_files};
 
     #[test]
     fn skips_ignored_dirs_and_finds_nested_sources() {
@@ -129,5 +161,37 @@ mod tests {
             paths,
             vec!["src/comp.vue", "src/index.ts", "src/nested/util.ts", "src/view.tsx"]
         );
+    }
+
+    #[test]
+    fn collects_repo_entries_with_depth_limit() {
+        let temp = TempDir::new().expect("temp dir");
+        let root = temp.path();
+
+        fs::create_dir_all(root.join("a/b/c/d")).expect("mkdir deep");
+        fs::create_dir_all(root.join("node_modules/pkg")).expect("mkdir ignored");
+        fs::write(root.join("a/root.txt"), "ok\n").expect("write root");
+        fs::write(root.join("a/b/c/inside.txt"), "ok\n").expect("write inside");
+        fs::write(root.join("a/b/c/d/too-deep.txt"), "no\n").expect("write too deep");
+        fs::write(root.join("node_modules/pkg/x.txt"), "no\n").expect("write ignored");
+
+        let entries = collect_repo_entries(root, 3).expect("collect entries");
+        let paths = entries
+            .iter()
+            .map(|e| {
+                e.path
+                    .strip_prefix(root)
+                    .expect("relative")
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            })
+            .collect::<Vec<_>>();
+
+        assert!(paths.contains(&"a".to_string()));
+        assert!(paths.contains(&"a/root.txt".to_string()));
+        assert!(paths.contains(&"a/b".to_string()));
+        assert!(paths.contains(&"a/b/c".to_string()));
+        assert!(!paths.contains(&"a/b/c/inside.txt".to_string()));
+        assert!(!paths.iter().any(|p| p.starts_with("node_modules")));
     }
 }

@@ -43,10 +43,14 @@ fn integration_handles_valid_and_invalid_files() {
     assert_eq!(result.summary.exported_functions, 4);
 
     let md = context_map::markdown::render_markdown(&result);
+    assert!(md.contains("# Repository Structure"));
+    assert!(md.contains("```text"));
+    assert!(md.contains("── src"));
     assert!(md.contains("hello(name: string) : string"));
     assert!(md.contains("sum(a: number, b: number) : number"));
     assert!(md.contains("Render(label: string)"));
     assert!(md.contains("fromVue(id: string) : string"));
     assert!(md.contains("## Parse Errors"));
     assert!(!md.contains("ignored.ts"));
+    assert!(!md.contains("dist"));
 }

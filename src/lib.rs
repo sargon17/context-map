@@ -33,8 +33,16 @@ pub struct RunSummary {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunOutput {
     pub root_path: String,
+    pub repo_entries: Vec<RepoEntry>,
     pub summary: RunSummary,
     pub file_results: Vec<FileResult>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepoEntry {
+    pub path: String,
+    pub is_dir: bool,
+    pub depth: usize,
 }
 
 #[derive(Debug)]
@@ -69,6 +77,14 @@ pub fn generate_context_map(root: &Path) -> Result<RunOutput, ContextMapError> {
 
     let canonical_root = fs::canonicalize(root)?;
     let mut ts_parser = parser::TsExportParser::new().map_err(ContextMapError::ParserInit)?;
+    let repo_entries = walker::collect_repo_entries(&canonical_root, 3)?
+        .into_iter()
+        .map(|entry| RepoEntry {
+            path: normalize_path(entry.path.strip_prefix(&canonical_root).unwrap_or(&entry.path)),
+            is_dir: entry.is_dir,
+            depth: entry.depth,
+        })
+        .collect::<Vec<_>>();
     let files = walker::collect_source_files(&canonical_root)?;
 
     let mut summary = RunSummary {
@@ -134,6 +150,7 @@ pub fn generate_context_map(root: &Path) -> Result<RunOutput, ContextMapError> {
 
     Ok(RunOutput {
         root_path: canonical_root.display().to_string(),
+        repo_entries,
         summary,
         file_results,
     })
