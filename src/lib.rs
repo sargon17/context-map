@@ -77,7 +77,7 @@ pub fn generate_context_map(root: &Path) -> Result<RunOutput, ContextMapError> {
 
     let canonical_root = fs::canonicalize(root)?;
     let mut ts_parser = parser::TsExportParser::new().map_err(ContextMapError::ParserInit)?;
-    let repo_entries = walker::collect_repo_entries(&canonical_root, 3)?
+    let repo_entries = walker::collect_repo_entries(&canonical_root, 10)?
         .into_iter()
         .map(|entry| RepoEntry {
             path: normalize_path(entry.path.strip_prefix(&canonical_root).unwrap_or(&entry.path)),
