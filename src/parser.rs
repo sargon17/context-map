@@ -9,6 +9,18 @@ pub struct ExtractedFunction {
     pub line: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtractedType {
+    pub name: String,
+    pub line: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ExtractedExports {
+    pub functions: Vec<ExtractedFunction>,
+    pub types: Vec<ExtractedType>,
+}
+
 pub struct TsExportParser {
     ts_parser: Parser,
     tsx_parser: Parser,
@@ -36,7 +48,7 @@ impl TsExportParser {
         &mut self,
         source: &str,
         kind: &SourceKind,
-    ) -> Result<Vec<ExtractedFunction>, String> {
+    ) -> Result<ExtractedExports, String> {
         match kind {
             SourceKind::Ts => self.extract_exports_from_ts(source),
             SourceKind::Tsx => self.extract_exports_from_tsx(source),
@@ -44,33 +56,40 @@ impl TsExportParser {
         }
     }
 
-    fn extract_exports_from_ts(&mut self, source: &str) -> Result<Vec<ExtractedFunction>, String> {
+    fn extract_exports_from_ts(&mut self, source: &str) -> Result<ExtractedExports, String> {
         parse_with(&mut self.ts_parser, source)
     }
 
-    fn extract_exports_from_tsx(&mut self, source: &str) -> Result<Vec<ExtractedFunction>, String> {
+    fn extract_exports_from_tsx(&mut self, source: &str) -> Result<ExtractedExports, String> {
         parse_with(&mut self.tsx_parser, source)
     }
 
-    fn extract_exports_from_vue(&mut self, source: &str) -> Result<Vec<ExtractedFunction>, String> {
+    fn extract_exports_from_vue(&mut self, source: &str) -> Result<ExtractedExports, String> {
         let blocks = extract_vue_scripts(source);
-        let mut all_exports = Vec::new();
+        let mut all = ExtractedExports::default();
 
         for block in blocks {
-            let mut exports = match block.kind {
+            let mut extracted = match block.kind {
                 SourceKind::Tsx => self.extract_exports_from_tsx(&block.content),
                 _ => self.extract_exports_from_ts(&block.content),
             }?;
 
-            for export in &mut exports {
+            for export in &mut extracted.functions {
+                export.line += block.line_offset;
+            }
+            for export in &mut extracted.types {
                 export.line += block.line_offset;
             }
 
-            all_exports.extend(exports);
+            all.functions.extend(extracted.functions);
+            all.types.extend(extracted.types);
         }
 
-        all_exports.sort_by(|a, b| a.line.cmp(&b.line).then(a.name.cmp(&b.name)));
-        Ok(all_exports)
+        all.functions
+            .sort_by(|a, b| a.line.cmp(&b.line).then(a.name.cmp(&b.name)));
+        all.types
+            .sort_by(|a, b| a.line.cmp(&b.line).then(a.name.cmp(&b.name)));
+        Ok(all)
     }
 }
 
@@ -129,7 +148,7 @@ fn extract_vue_scripts(source: &str) -> Vec<VueScriptBlock> {
     out
 }
 
-fn parse_with(parser: &mut Parser, source: &str) -> Result<Vec<ExtractedFunction>, String> {
+fn parse_with(parser: &mut Parser, source: &str) -> Result<ExtractedExports, String> {
     let tree = parser
         .parse(source, None)
         .ok_or_else(|| "failed to parse file".to_string())?;
@@ -141,8 +160,8 @@ fn parse_with(parser: &mut Parser, source: &str) -> Result<Vec<ExtractedFunction
     Ok(extract_from_tree(&tree, source))
 }
 
-fn extract_from_tree(tree: &Tree, source: &str) -> Vec<ExtractedFunction> {
-    let mut exports = Vec::new();
+fn extract_from_tree(tree: &Tree, source: &str) -> ExtractedExports {
+    let mut exports = ExtractedExports::default();
     let root = tree.root_node();
     let mut cursor = root.walk();
 
@@ -151,39 +170,54 @@ fn extract_from_tree(tree: &Tree, source: &str) -> Vec<ExtractedFunction> {
             continue;
         }
 
-        let Some(exported) = first_named_child(child, source) else {
+        let Some(exported) = first_named_child(child) else {
             continue;
         };
 
         match exported.kind() {
             "function_declaration" => {
                 if let Some(extracted) = function_declaration_export(exported, source) {
-                    exports.push(extracted);
+                    exports.functions.push(extracted);
                 }
             }
             "lexical_declaration" => {
                 if is_const_lexical(exported, source) {
-                    exports.extend(const_callable_exports(exported, source));
+                    exports
+                        .functions
+                        .extend(const_callable_exports(exported, source));
+                }
+            }
+            "interface_declaration" => {
+                if let Some(extracted) = type_like_export(exported, source) {
+                    exports.types.push(extracted);
+                }
+            }
+            "type_alias_declaration" => {
+                if let Some(extracted) = type_like_export(exported, source) {
+                    exports.types.push(extracted);
                 }
             }
             _ => {}
         }
     }
 
-    exports.sort_by(|a, b| a.line.cmp(&b.line).then(a.name.cmp(&b.name)));
+    exports
+        .functions
+        .sort_by(|a, b| a.line.cmp(&b.line).then(a.name.cmp(&b.name)));
+    exports
+        .types
+        .sort_by(|a, b| a.line.cmp(&b.line).then(a.name.cmp(&b.name)));
     exports
 }
 
-fn first_named_child<'a>(node: Node<'a>, source: &str) -> Option<Node<'a>> {
+fn first_named_child<'a>(node: Node<'a>) -> Option<Node<'a>> {
     let mut cursor = node.walk();
     node.named_children(&mut cursor).find(|child| {
         let kind = child.kind();
         if kind == "export_clause" || kind == "namespace_export" {
             return false;
         }
-
-        let text = text_for(*child, source);
-        !text.starts_with("type ")
+        true
     })
 }
 
@@ -208,6 +242,14 @@ fn function_declaration_export(node: Node<'_>, source: &str) -> Option<Extracted
     Some(ExtractedFunction {
         name,
         signature,
+        line: name_node.start_position().row + 1,
+    })
+}
+
+fn type_like_export(node: Node<'_>, source: &str) -> Option<ExtractedType> {
+    let name_node = node.child_by_field_name("name")?;
+    Some(ExtractedType {
+        name: text_for(name_node, source).to_string(),
         line: name_node.start_position().row + 1,
     })
 }
@@ -341,9 +383,9 @@ mod tests {
             .extract_exports_for_source(source, &SourceKind::Ts)
             .expect("extract");
 
-        assert_eq!(exports.len(), 1);
-        assert_eq!(exports[0].name, "greet");
-        assert_eq!(exports[0].signature, "greet(name: string) : string");
+        assert_eq!(exports.functions.len(), 1);
+        assert_eq!(exports.functions[0].name, "greet");
+        assert_eq!(exports.functions[0].signature, "greet(name: string) : string");
     }
 
     #[test]
@@ -354,9 +396,22 @@ mod tests {
             .extract_exports_for_source(source, &SourceKind::Ts)
             .expect("extract");
 
-        assert_eq!(exports.len(), 1);
-        assert_eq!(exports[0].name, "sum");
-        assert_eq!(exports[0].signature, "sum(a: number, b: number) : number");
+        assert_eq!(exports.functions.len(), 1);
+        assert_eq!(exports.functions[0].name, "sum");
+        assert_eq!(exports.functions[0].signature, "sum(a: number, b: number) : number");
+    }
+
+    #[test]
+    fn detects_exported_types_and_interfaces() {
+        let mut parser = TsExportParser::new().expect("parser");
+        let source = "export interface User { id: string }\nexport type UserId = string;";
+        let exports = parser
+            .extract_exports_for_source(source, &SourceKind::Ts)
+            .expect("extract");
+
+        assert_eq!(exports.types.len(), 2);
+        assert_eq!(exports.types[0].name, "User");
+        assert_eq!(exports.types[1].name, "UserId");
     }
 
     #[test]
@@ -367,13 +422,13 @@ mod tests {
             .extract_exports_for_source(source, &SourceKind::Tsx)
             .expect("extract");
 
-        assert_eq!(exports.len(), 1);
-        assert_eq!(exports[0].name, "Render");
-        assert_eq!(exports[0].signature, "Render(name: string)");
+        assert_eq!(exports.functions.len(), 1);
+        assert_eq!(exports.functions[0].name, "Render");
+        assert_eq!(exports.functions[0].signature, "Render(name: string)");
     }
 
     #[test]
-    fn detects_exported_functions_in_vue_script() {
+    fn detects_exported_symbols_in_vue_script() {
         let mut parser = TsExportParser::new().expect("parser");
         let source = r#"
 <template><div /></template>
@@ -381,29 +436,34 @@ mod tests {
 export function fromVue(input: string): string {
   return input;
 }
+export interface VueDto { id: string }
 </script>
 "#;
         let exports = parser
             .extract_exports_for_source(source, &SourceKind::Vue)
             .expect("extract");
 
-        assert_eq!(exports.len(), 1);
-        assert_eq!(exports[0].name, "fromVue");
-        assert_eq!(exports[0].line, 4);
+        assert_eq!(exports.functions.len(), 1);
+        assert_eq!(exports.functions[0].name, "fromVue");
+        assert_eq!(exports.functions[0].line, 4);
+        assert_eq!(exports.types.len(), 1);
+        assert_eq!(exports.types[0].name, "VueDto");
+        assert_eq!(exports.types[0].line, 7);
     }
 
     #[test]
     fn ignores_non_exported_and_reexports() {
         let mut parser = TsExportParser::new().expect("parser");
         let source = r#"
-function internalFn() {}
-export { internalFn }
-export { externalFn } from "./dep"
+interface Internal {}
+export { Internal }
+export type { ImportedType } from "./dep"
 "#;
         let exports = parser
             .extract_exports_for_source(source, &SourceKind::Ts)
             .expect("extract");
 
-        assert!(exports.is_empty());
+        assert!(exports.functions.is_empty());
+        assert!(exports.types.is_empty());
     }
 }

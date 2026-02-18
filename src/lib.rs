@@ -7,6 +7,36 @@ pub mod markdown;
 pub mod parser;
 pub mod walker;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RenderProfile {
+    Compact,
+    Balanced,
+    Detailed,
+}
+
+impl Default for RenderProfile {
+    fn default() -> Self {
+        Self::Balanced
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RenderConfig {
+    pub profile: RenderProfile,
+    pub include_types: bool,
+    pub tree_depth: usize,
+}
+
+impl Default for RenderConfig {
+    fn default() -> Self {
+        Self {
+            profile: RenderProfile::Balanced,
+            include_types: true,
+            tree_depth: 10,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FunctionExport {
     pub name: String,
@@ -16,9 +46,17 @@ pub struct FunctionExport {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypeExport {
+    pub name: String,
+    pub file_path: String,
+    pub line: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileResult {
     pub file_path: String,
-    pub exports: Vec<FunctionExport>,
+    pub function_exports: Vec<FunctionExport>,
+    pub type_exports: Vec<TypeExport>,
     pub parse_error: Option<String>,
 }
 
@@ -28,6 +66,7 @@ pub struct RunSummary {
     pub parsed: usize,
     pub parse_failed: usize,
     pub exported_functions: usize,
+    pub exported_types: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,13 +110,20 @@ impl From<std::io::Error> for ContextMapError {
 }
 
 pub fn generate_context_map(root: &Path) -> Result<RunOutput, ContextMapError> {
+    generate_context_map_with_depth(root, RenderConfig::default().tree_depth)
+}
+
+pub fn generate_context_map_with_depth(
+    root: &Path,
+    tree_depth: usize,
+) -> Result<RunOutput, ContextMapError> {
     if !root.is_dir() {
         return Err(ContextMapError::InvalidRoot(root.to_path_buf()));
     }
 
     let canonical_root = fs::canonicalize(root)?;
     let mut ts_parser = parser::TsExportParser::new().map_err(ContextMapError::ParserInit)?;
-    let repo_entries = walker::collect_repo_entries(&canonical_root, 10)?
+    let repo_entries = walker::collect_repo_entries(&canonical_root, tree_depth)?
         .into_iter()
         .map(|entry| RepoEntry {
             path: normalize_path(entry.path.strip_prefix(&canonical_root).unwrap_or(&entry.path)),
@@ -106,8 +152,10 @@ pub fn generate_context_map(root: &Path) -> Result<RunOutput, ContextMapError> {
             Ok(source) => match ts_parser.extract_exports_for_source(&source, &source_file.kind) {
                 Ok(extracted) => {
                     summary.parsed += 1;
-                    summary.exported_functions += extracted.len();
-                    let exports = extracted
+                    summary.exported_functions += extracted.functions.len();
+                    summary.exported_types += extracted.types.len();
+                    let function_exports = extracted
+                        .functions
                         .into_iter()
                         .map(|entry| FunctionExport {
                             name: entry.name,
@@ -116,10 +164,20 @@ pub fn generate_context_map(root: &Path) -> Result<RunOutput, ContextMapError> {
                             line: entry.line,
                         })
                         .collect::<Vec<_>>();
+                    let type_exports = extracted
+                        .types
+                        .into_iter()
+                        .map(|entry| TypeExport {
+                            name: entry.name,
+                            file_path: relative.clone(),
+                            line: entry.line,
+                        })
+                        .collect::<Vec<_>>();
 
                     file_results.push(FileResult {
                         file_path: relative,
-                        exports,
+                        function_exports,
+                        type_exports,
                         parse_error: None,
                     });
                 }
@@ -127,7 +185,8 @@ pub fn generate_context_map(root: &Path) -> Result<RunOutput, ContextMapError> {
                     summary.parse_failed += 1;
                     file_results.push(FileResult {
                         file_path: relative,
-                        exports: Vec::new(),
+                        function_exports: Vec::new(),
+                        type_exports: Vec::new(),
                         parse_error: Some(err),
                     });
                 }
@@ -136,7 +195,8 @@ pub fn generate_context_map(root: &Path) -> Result<RunOutput, ContextMapError> {
                 summary.parse_failed += 1;
                 file_results.push(FileResult {
                     file_path: relative,
-                    exports: Vec::new(),
+                    function_exports: Vec::new(),
+                    type_exports: Vec::new(),
                     parse_error: Some(err.to_string()),
                 });
             }
@@ -145,7 +205,10 @@ pub fn generate_context_map(root: &Path) -> Result<RunOutput, ContextMapError> {
 
     file_results.sort_by(|a, b| a.file_path.cmp(&b.file_path));
     for file in &mut file_results {
-        file.exports.sort_by(|a, b| a.line.cmp(&b.line).then(a.name.cmp(&b.name)));
+        file.function_exports
+            .sort_by(|a, b| a.line.cmp(&b.line).then(a.name.cmp(&b.name)));
+        file.type_exports
+            .sort_by(|a, b| a.line.cmp(&b.line).then(a.name.cmp(&b.name)));
     }
 
     Ok(RunOutput {
@@ -157,8 +220,16 @@ pub fn generate_context_map(root: &Path) -> Result<RunOutput, ContextMapError> {
 }
 
 pub fn run(root: &Path, out: &Path) -> Result<RunSummary, ContextMapError> {
-    let output = generate_context_map(root)?;
-    let markdown = markdown::render_markdown(&output);
+    run_with_config(root, out, RenderConfig::default())
+}
+
+pub fn run_with_config(
+    root: &Path,
+    out: &Path,
+    config: RenderConfig,
+) -> Result<RunSummary, ContextMapError> {
+    let output = generate_context_map_with_depth(root, config.tree_depth)?;
+    let markdown = markdown::render_markdown_with_config(&output, config);
     fs::write(out, markdown)?;
     Ok(output.summary)
 }

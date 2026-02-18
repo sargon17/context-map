@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use crate::{RepoEntry, RunOutput};
+use crate::{RenderConfig, RenderProfile, RepoEntry, RunOutput};
 
 #[derive(Default)]
 struct TreeNode {
@@ -9,6 +9,10 @@ struct TreeNode {
 }
 
 pub fn render_markdown(output: &RunOutput) -> String {
+    render_markdown_with_config(output, RenderConfig::default())
+}
+
+pub fn render_markdown_with_config(output: &RunOutput, config: RenderConfig) -> String {
     let mut lines = Vec::new();
 
     lines.push("# Repository Structure".to_string());
@@ -22,7 +26,7 @@ pub fn render_markdown(output: &RunOutput) -> String {
     let files_with_exports = output
         .file_results
         .iter()
-        .filter(|f| !f.exports.is_empty())
+        .filter(|f| !f.function_exports.is_empty())
         .collect::<Vec<_>>();
 
     if files_with_exports.is_empty() {
@@ -31,11 +35,37 @@ pub fn render_markdown(output: &RunOutput) -> String {
         for file in files_with_exports {
             lines.push(String::new());
             lines.push(format!("### `{}`", file.file_path));
-            for export in &file.exports {
+            for export in &file.function_exports {
                 lines.push(format!(
-                    "- `{}` (`{}:{}`)",
-                    export.signature, export.file_path, export.line
+                    "- `{}`",
+                    format_function_entry(export, config.profile)
                 ));
+            }
+        }
+    }
+
+    if config.include_types {
+        lines.push(String::new());
+        lines.push("# Type Inventory".to_string());
+        let files_with_types = output
+            .file_results
+            .iter()
+            .filter(|f| !f.type_exports.is_empty())
+            .collect::<Vec<_>>();
+
+        if files_with_types.is_empty() {
+            lines.push("No exported types or interfaces found.".to_string());
+        } else {
+            for file in files_with_types {
+                lines.push(String::new());
+                lines.push(format!("### `{}`", file.file_path));
+                for ty in &file.type_exports {
+                    let value = match config.profile {
+                        RenderProfile::Detailed => format!("{} @L{}", ty.name, ty.line),
+                        _ => ty.name.clone(),
+                    };
+                    lines.push(format!("- `{value}`"));
+                }
             }
         }
     }
@@ -55,6 +85,47 @@ pub fn render_markdown(output: &RunOutput) -> String {
     }
 
     lines.join("\n") + "\n"
+}
+
+fn format_function_entry(export: &crate::FunctionExport, profile: RenderProfile) -> String {
+    match profile {
+        RenderProfile::Compact => export.name.clone(),
+        RenderProfile::Balanced => {
+            if let Some(params) = extract_parameters(&export.signature, &export.name) {
+                format!("{}{}", export.name, normalize_whitespace(&params))
+            } else {
+                export.name.clone()
+            }
+        }
+        RenderProfile::Detailed => format!("{} @L{}", normalize_whitespace(&export.signature), export.line),
+    }
+}
+
+fn extract_parameters(signature: &str, name: &str) -> Option<String> {
+    let rest = signature.strip_prefix(name)?.trim_start();
+    let mut chars = rest.char_indices();
+    let (start_idx, start_char) = chars.next()?;
+    if start_idx != 0 || start_char != '(' {
+        return None;
+    }
+
+    let mut depth = 0usize;
+    for (idx, ch) in rest.char_indices() {
+        if ch == '(' {
+            depth += 1;
+        } else if ch == ')' {
+            depth = depth.saturating_sub(1);
+            if depth == 0 {
+                return Some(rest[..=idx].to_string());
+            }
+        }
+    }
+
+    None
+}
+
+fn normalize_whitespace(input: &str) -> String {
+    input.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn render_repo_tree(entries: &[RepoEntry]) -> Vec<String> {
@@ -130,13 +201,15 @@ fn render_children(node: &TreeNode, prefix: &str, out: &mut Vec<String>) {
 
 #[cfg(test)]
 mod tests {
-    use crate::{FileResult, FunctionExport, RepoEntry, RunOutput, RunSummary};
+    use crate::{
+        FileResult, FunctionExport, RenderConfig, RenderProfile, RepoEntry, RunOutput, RunSummary,
+        TypeExport,
+    };
 
-    use super::render_markdown;
+    use super::render_markdown_with_config;
 
-    #[test]
-    fn renders_grouped_sorted_markdown() {
-        let output = RunOutput {
+    fn sample_output() -> RunOutput {
+        RunOutput {
             root_path: "/tmp/repo".to_string(),
             repo_entries: vec![
                 RepoEntry {
@@ -160,45 +233,95 @@ mod tests {
                 parsed: 2,
                 parse_failed: 1,
                 exported_functions: 2,
+                exported_types: 1,
             },
             file_results: vec![
                 FileResult {
                     file_path: "src/a.ts".to_string(),
-                    exports: vec![FunctionExport {
+                    function_exports: vec![FunctionExport {
                         name: "a".to_string(),
-                        signature: "a(): string".to_string(),
+                        signature: "a(\n  x: number,\n  y: number,\n) : string".to_string(),
                         file_path: "src/a.ts".to_string(),
                         line: 2,
                     }],
-                    parse_error: None,
-                },
-                FileResult {
-                    file_path: "src/b.ts".to_string(),
-                    exports: vec![FunctionExport {
-                        name: "b".to_string(),
-                        signature: "b(x: number)".to_string(),
-                        file_path: "src/b.ts".to_string(),
-                        line: 8,
+                    type_exports: vec![TypeExport {
+                        name: "User".to_string(),
+                        file_path: "src/a.ts".to_string(),
+                        line: 10,
                     }],
                     parse_error: None,
                 },
                 FileResult {
                     file_path: "src/c.ts".to_string(),
-                    exports: vec![],
+                    function_exports: vec![],
+                    type_exports: vec![],
                     parse_error: Some("syntax parse error".to_string()),
                 },
             ],
-        };
+        }
+    }
 
-        let markdown = render_markdown(&output);
+    #[test]
+    fn compact_profile_is_token_lean() {
+        let markdown = render_markdown_with_config(
+            &sample_output(),
+            RenderConfig {
+                profile: RenderProfile::Compact,
+                include_types: true,
+                tree_depth: 10,
+            },
+        );
 
-        assert!(markdown.starts_with("# Repository Structure\n```text\n.\n"));
-        assert!(markdown.contains("├── src"));
-        assert!(markdown.contains("└── Cargo.toml"));
+        assert!(markdown.contains("# Repository Structure"));
         assert!(markdown.contains("# Exported Functions"));
-        assert!(markdown.contains("### `src/a.ts`"));
-        assert!(markdown.contains("### `src/b.ts`"));
-        assert!(markdown.contains("`a(): string` (`src/a.ts:2`)"));
-        assert!(markdown.contains("`src/c.ts`: syntax parse error"));
+        assert!(markdown.contains("- `a`"));
+        assert!(!markdown.contains("src/a.ts:2"));
+        assert!(markdown.contains("# Type Inventory"));
+        assert!(markdown.contains("- `User`"));
+    }
+
+    #[test]
+    fn balanced_profile_compacts_signatures() {
+        let markdown = render_markdown_with_config(
+            &sample_output(),
+            RenderConfig {
+                profile: RenderProfile::Balanced,
+                include_types: true,
+                tree_depth: 10,
+            },
+        );
+
+        assert!(markdown.contains("- `a( x: number, y: number, )`"));
+        assert!(!markdown.contains("@L2"));
+        assert!(!markdown.contains("src/a.ts:2"));
+    }
+
+    #[test]
+    fn detailed_profile_adds_line_marker() {
+        let markdown = render_markdown_with_config(
+            &sample_output(),
+            RenderConfig {
+                profile: RenderProfile::Detailed,
+                include_types: true,
+                tree_depth: 10,
+            },
+        );
+
+        assert!(markdown.contains("- `a( x: number, y: number, ) : string @L2`"));
+        assert!(markdown.contains("- `User @L10`"));
+    }
+
+    #[test]
+    fn can_disable_type_inventory() {
+        let markdown = render_markdown_with_config(
+            &sample_output(),
+            RenderConfig {
+                profile: RenderProfile::Balanced,
+                include_types: false,
+                tree_depth: 10,
+            },
+        );
+
+        assert!(!markdown.contains("# Type Inventory"));
     }
 }

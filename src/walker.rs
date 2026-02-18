@@ -55,7 +55,7 @@ fn classify_source_file(path: &Path) -> Option<SourceKind> {
     match ext {
         "ts" => {
             let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default();
-            if file_name.ends_with(".d.ts") {
+            if file_name.ends_with(".d.ts") || file_name.ends_with(".props.ts") {
                 None
             } else {
                 Some(SourceKind::Ts)
@@ -142,6 +142,10 @@ mod tests {
             .expect("write nested");
         fs::write(root.join("src/types.d.ts"), "declare const x: string\n")
             .expect("write dts");
+        fs::write(root.join("src/card.props.ts"), "export const ignored = 1;\n")
+            .expect("write props ts");
+        fs::write(root.join("src/card.props.tsx"), "export const kept = () => <div />;\n")
+            .expect("write props tsx");
         fs::write(root.join("node_modules/pkg/nope.ts"), "export function nope() {}\n")
             .expect("write ignored");
 
@@ -159,7 +163,13 @@ mod tests {
 
         assert_eq!(
             paths,
-            vec!["src/comp.vue", "src/index.ts", "src/nested/util.ts", "src/view.tsx"]
+            vec![
+                "src/card.props.tsx",
+                "src/comp.vue",
+                "src/index.ts",
+                "src/nested/util.ts",
+                "src/view.tsx"
+            ]
         );
     }
 
