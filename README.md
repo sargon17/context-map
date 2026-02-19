@@ -12,7 +12,7 @@ from:
 - `.tsx`
 - `.vue` (`<script>` blocks)
 
-and writes a structured `context-map.md` with:
+and writes a structured `REPO.md` with:
 - repository tree
 - exported functions grouped by file
 - optional type inventory grouped by file
@@ -74,7 +74,7 @@ context-map --root <path> [--out <file>] [--profile <compact|balanced|detailed>]
 
 - `--out <file>`
   - Output Markdown file path
-  - Default: `<root>/context-map.md`
+  - Default: `<root>/REPO.md`
 
 - `--profile <compact|balanced|detailed>`
   - Controls symbol formatting verbosity

@@ -43,9 +43,7 @@ struct Args {
 
 fn main() {
     let args = Args::parse();
-    let output = args
-        .out
-        .unwrap_or_else(|| args.root.join("context-map.md"));
+    let output = args.out.unwrap_or_else(|| args.root.join("REPO.md"));
     let profile: RenderProfile = args.profile.into();
     let config = RenderConfig {
         profile,
